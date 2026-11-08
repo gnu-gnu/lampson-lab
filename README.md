@@ -4,6 +4,49 @@
 
 > 이름은 Butler Lampson에게서 따왔습니다. 그의 "speaks for" 모델이 이 랩이 구현하는 체인을 설명합니다: 워크로드 → 신원 → 역할 → 계정.
 
+## 동작 구조
+
+```mermaid
+flowchart LR
+  ROOT["랩 루트 CA<br/>(bootstrap이 생성)"]
+
+  subgraph client["client 컨테이너 (capability 없음)"]
+    L["lab-login<br/>계정 uid로 실행<br/>deployer · monitor · stranger · intruder"]
+  end
+
+  subgraph spire["SPIRE"]
+    S["spire-server"]
+    A["spire-agent<br/>uid로 워크로드 증명"]
+  end
+
+  CA["step-ca<br/>provisioner x5c-spire<br/>체인 검증 · 매핑 · policy · 5분 상한"]
+
+  subgraph hosts["sshd 호스트"]
+    HB["host-billing<br/>admin · operator · readonly"]
+    HC["host-crm<br/>admin · operator · readonly"]
+  end
+
+  ROOT -. "intermediate 서명" .-> S
+  ROOT -. "X5C 신뢰 루트" .-> CA
+  S --- A
+  L -- "1. Workload API" --> A
+  A -- "2. X.509-SVID 5분<br/>등록된 uid만" --> L
+  L -- "3. SVID 키로 서명한 X5C 요청" --> CA
+  CA -- "4. SSH 인증서 5분 이하<br/>KeyID = SPIFFE ID<br/>principal = role-{역할}@{그룹}" --> L
+  L -- "5. 그 인증서로만 ssh" --> HB
+  L -- "5. 그 인증서로만 ssh" --> HC
+  CA -. "SSH user CA 공개키" .-> hosts
+```
+
+1. client의 계정(uid)이 spire-agent에 SVID를 요청합니다. 요청에 신원을 적는 곳은 없고, agent가 프로세스의 uid를 보고 판단합니다. 등록되지 않은 uid(intruder)는 여기서 거부됩니다.
+2. agent가 그 uid의 X.509-SVID(`spiffe://lab/client/<계정>`)를 줍니다.
+3. client가 SVID 키로 서명한 X5C 토큰으로 step-ca에 SSH 인증서를 요청합니다.
+4. step-ca가 SVID 체인을 랩 루트로 검증합니다. 이어서 SPIFFE ID를 매핑해 principal을 정하고, policy와 수명 상한을 적용해 서명합니다. 매핑이 없는 신원(stranger)과 `role-admin@*`은 여기서 거부됩니다.
+5. 그 인증서로만 호스트에 접속합니다.
+   - 호스트는 step-ca의 SSH user CA만 믿습니다.
+   - principal이 어느 역할 계정으로 들어갈 수 있는지 정합니다.
+   - 연결은 열린 지 60분이 지나면 호스트가 끊습니다.
+
 ## 무엇을 보여 주는가
 
 1. **신원은 프로세스에서 나옵니다.** client 컨테이너의 계정(uid)마다 SPIRE가 X.509-SVID를 줍니다. 등록되지 않은 계정(intruder)은 아무것도 받지 못합니다.
