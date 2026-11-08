@@ -1,0 +1,7 @@
+#!/bin/sh
+# Dummy service restart (CONTRACT §5.3): prints that it ran and who called it.
+# The caller is SUDO_USER only when running as root through sudo (sudo sets it
+# and resets the environment); otherwise it is the real user, so a caller
+# cannot be faked by setting SUDO_USER.
+if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then caller=$SUDO_USER; else caller=$(id -un); fi
+echo "demo-restart: called by ${caller} as $(id -un) on $(hostname)"

@@ -1,0 +1,31 @@
+# sshd for the lab hosts (CONTRACT §5.4). Complete file: nothing is included
+# from the distribution defaults.
+
+# --- CONTRACT §5.4 (required as written) ---
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile none
+TrustedUserCAKeys /etc/ssh/user_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+PermitRootLogin no
+# Allowed on the server on purpose: the certificates must be what blocks
+# forwarding (no permit-port-forwarding extension, AC-14).
+AllowTcpForwarding yes
+LogLevel VERBOSE
+
+# --- lab ---
+Port 22
+# Host key persists in a per-host volume, so clients keep seeing the same key
+# across `make up` (host certificates are EP-04).
+HostKey /etc/ssh/host-keys/ssh_host_ed25519_key
+UsePAM no
+# Only certificate-based publickey: no host-based or GSSAPI paths.
+HostbasedAuthentication no
+GSSAPIAuthentication no
+PrintMotd no
+# OpenSSH 10 penalises source addresses with failed or unauthenticated
+# connections. The negative tests (AC-12, AC-13, AC-15) fail on purpose from
+# the single client address, which would get it refused mid-run and turn real
+# results into "connection refused" (DECISIONS D-16).
+PerSourcePenalties no

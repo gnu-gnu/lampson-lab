@@ -1,0 +1,166 @@
+name: lampson-lab
+
+# Start with `make up`, not a bare `docker compose up`:
+#   1. `make up` runs `bootstrap pki` alone first, so the lab PKI and the step-ca
+#      config exist before spire-server and step-ca start (the SPIRE images have
+#      no shell to wait with). It then removes the step-ca container so the new
+#      one reads the ca.json bootstrap just wrote.
+#   2. compose then starts, in depends_on order:
+#        bootstrap (waits for spire-server, issues join token, writes entries, exits 0)
+#        spire-server (healthy) -> spire-agent (healthy) -> client
+#        step-ca (healthy)                                -> client
+
+x-lab-build: &lab-build
+  context: .
+  dockerfile: Dockerfile
+  args:
+    DEBIAN_IMAGE: ${DEBIAN_IMAGE:?set in .env}
+    SPIRE_VERSION: ${SPIRE_VERSION:?set in .env}
+    STEP_CLI_VERSION: ${STEP_CLI_VERSION:?set in .env}
+
+services:
+  bootstrap:
+    build:
+      <<: *lab-build
+      target: bootstrap
+    image: lampson-lab/bootstrap:local
+    restart: "no"
+    volumes:
+      - lab-pki-private:/lab/pki-private
+      - lab-root:/lab/root
+      - spire-upstream:/lab/spire-upstream
+      - spire-server-data:/lab/spire-server-data
+      - spire-server-socket:/lab/spire-server-socket
+      - agent-token:/lab/agent-token
+      # read-only, to tell whether the agent still has its SVID (DECISIONS D-04)
+      - spire-agent-data:/lab/spire-agent-data:ro
+      - step-ca:/lab/step-ca
+      - step-ca-public:/lab/step-ca-public
+
+  spire-server:
+    image: ghcr.io/spiffe/spire-server:${SPIRE_VERSION:?set in .env}
+    depends_on:
+      # Not service_healthy: on a re-run bootstrap can exit before compose sees
+      # it healthy, which compose reports as a failed dependency.
+      bootstrap:
+        condition: service_started
+    command: ["-config", "/etc/spire/server.conf"]
+    volumes:
+      - ./spire/server/server.conf:/etc/spire/server.conf:ro
+      - spire-upstream:/etc/spire/upstream:ro
+      - spire-server-data:/opt/spire/data
+      - spire-server-socket:/tmp/spire-server/private
+    healthcheck:
+      test: ["CMD", "/opt/spire/bin/spire-server", "healthcheck"]
+      interval: 5s
+      start_period: 60s
+      start_interval: 1s
+
+  spire-agent:
+    image: ghcr.io/spiffe/spire-agent:${SPIRE_VERSION:?set in .env}
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      spire-server:
+        condition: service_healthy
+    command: ["-config", "/etc/spire/agent.conf", "-joinTokenFile", "/run/agent-token/join_token"]
+    volumes:
+      - ./spire/agent/agent.conf:/etc/spire/agent.conf:ro
+      - lab-root:/etc/spire/bundle:ro
+      - agent-token:/run/agent-token:ro
+      - spire-agent-data:/opt/spire/data
+      - spire-agent-socket:/tmp/spire-agent/public
+    healthcheck:
+      test: ["CMD", "/opt/spire/bin/spire-agent", "healthcheck"]
+      interval: 5s
+      start_period: 60s
+      start_interval: 1s
+
+  step-ca:
+    image: smallstep/step-ca:${STEP_CA_VERSION:?set in .env}
+    depends_on:
+      bootstrap:
+        condition: service_started # see spire-server
+    # Keys are unencrypted on the volume (DECISIONS R-03), so no password file.
+    # Only its own volume is mounted: the lab root reaches step-ca as the inline
+    # x5c-spire roots in ca.json, and no SPIRE or lab-root key is visible here.
+    command: ["/usr/local/bin/step-ca", "/home/step/config/ca.json"]
+    volumes:
+      - step-ca:/home/step
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000", "--root", "/home/step/certs/root_ca.crt"]
+      interval: 5s
+      start_period: 60s
+      start_interval: 1s
+
+  client:
+    build:
+      <<: *lab-build
+      target: client
+    image: lampson-lab/client:local
+    # The unix workload attestor resolves callers by PID, so the client must
+    # share the agent's PID namespace (CONTRACT §3).
+    pid: "service:spire-agent"
+    # Root in the client gets no capabilities and cannot regain them, so it
+    # can neither switch uid (identity is by uid) nor reach the agent's files
+    # through /proc/1/root in the shared PID namespace (DECISIONS D-09).
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      spire-agent:
+        condition: service_healthy
+      step-ca:
+        condition: service_healthy
+    volumes:
+      - spire-agent-socket:/run/spire/agent:ro
+      - lab-root:/etc/lab:ro
+      - step-ca-public:/etc/lab-step-ca:ro
+
+  host-billing: &sshd-host
+    build:
+      <<: *lab-build
+      target: sshd
+    image: lampson-lab/sshd:local
+    hostname: host-billing
+    environment:
+      HOST_GROUP: billing
+      # Connections are closed 60 minutes after they open, whatever the
+      # certificate lifetime (TODO EP-11, DECISIONS D-21).
+      SESSION_MAX_SECONDS: 3600
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - step-ca-public:/run/lab-ca:ro
+      - host-billing-keys:/etc/ssh/host-keys
+    healthcheck:
+      # pid files, not a TCP probe: probes would show up as connections in the
+      # sshd log that AC-18 reads. Unhealthy when the session reaper is gone.
+      test: ["CMD-SHELL", "test -s /run/sshd.pid && kill -0 \"$$(cat /run/lab-session-reaper.pid)\""]
+      interval: 5s
+      start_period: 30s
+      start_interval: 1s
+
+  host-crm:
+    <<: *sshd-host
+    hostname: host-crm
+    environment:
+      HOST_GROUP: crm
+      SESSION_MAX_SECONDS: 3600
+    volumes:
+      - step-ca-public:/run/lab-ca:ro
+      - host-crm-keys:/etc/ssh/host-keys
+
+volumes:
+  lab-pki-private:
+  lab-root:
+  spire-upstream:
+  spire-server-data:
+  spire-server-socket:
+  agent-token:
+  spire-agent-data:
+  spire-agent-socket:
+  step-ca:
+  step-ca-public:
+  host-billing-keys:
+  host-crm-keys:

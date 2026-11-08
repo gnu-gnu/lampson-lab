@@ -1,0 +1,50 @@
+# gitleaks rules for this repository (CONTRACT AC-22, DECISIONS D-20).
+# The default rule set (private keys, JWTs, cloud and SaaS credentials, ...)
+# plus the secret formats only this lab produces, which the defaults do not know.
+title = "lampson-lab"
+
+[extend]
+useDefault = true
+# Replaced by "private-key-block" below. The default rule matches from a BEGIN
+# header to the next "KEY-----", so two header strings with no key between
+# them (tests/helpers/spire-identity.sh writes the PEM armour around a key it
+# reads at run time; audits quote headers) count as a key.
+disabledRules = ["private-key"]
+
+# Private key (PEM, OpenSSH, PKCS#8, encrypted): a BEGIN header followed by a
+# key body, after optional "Name: value" PEM headers (Proc-Type, DEK-Info).
+# Between header and body it allows whitespace (CRLF, YAML indentation),
+# quotes and commas, and escaped newlines (a key inside a JSON string).
+[[rules]]
+id = "private-key-block"
+description = "Private key"
+regex = '''(?i)-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----(?:\s|\\[rn]|["',])*(?:[A-Za-z-]+:[^\n]*(?:\s|\\[rn])+)*[A-Za-z0-9+/=]{40,}'''
+keywords = ["-----begin"]
+
+# SPIRE join token, in a SPIFFE ID (spiffe://lab/spire/agent/join_token/<uuid>)
+# or as a config value (join_token = "<uuid>", "joinToken": "<uuid>").
+[[rules]]
+id = "spire-join-token"
+description = "SPIRE join token"
+regex = '''(?i)join_?token(?:/|["']?\s*[=:]\s*["']?)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'''
+keywords = ["join_token", "jointoken"]
+
+# A file that is nothing but a UUID: a join token written to disk on its own.
+[[rules]]
+id = "bare-token-file"
+description = "File that holds only a token (UUID)"
+regex = '''\A\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*\z'''
+
+# JWK private key: a JSON key with a "d" member.
+[[rules]]
+id = "jwk-private-key"
+description = "JWK private key"
+regex = '''"d"\s*:\s*"([A-Za-z0-9_-]{20,})"'''
+keywords = ['"kty"']
+
+# SPIRE KeyManager "disk" file (keys.json): base64 PKCS#8 DER in JSON.
+[[rules]]
+id = "spire-keymanager-keys"
+description = "SPIRE KeyManager key file"
+regex = '''"keys"\s*:\s*\{[^}]*"(M[A-Za-z0-9+/]{40,}={0,2})"'''
+keywords = ['"keys"']

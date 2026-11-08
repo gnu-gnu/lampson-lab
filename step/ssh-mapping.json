@@ -1,0 +1,10 @@
+{
+  "spiffe://lab/client/deployer": {
+    "principals": ["role-operator@billing"],
+    "maxTTL": 300
+  },
+  "spiffe://lab/client/monitor": {
+    "principals": ["role-readonly@billing", "role-readonly@crm"],
+    "maxTTL": 900
+  }
+}

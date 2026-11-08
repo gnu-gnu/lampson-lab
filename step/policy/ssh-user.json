@@ -1,0 +1,8 @@
+{
+  "allow": {
+    "email": ["role-operator@billing", "role-readonly@billing", "role-readonly@crm"]
+  },
+  "deny": {
+    "email": ["role-admin@billing", "role-admin@crm"]
+  }
+}

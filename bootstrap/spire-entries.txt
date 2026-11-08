@@ -1,0 +1,8 @@
+# SPIRE workload entries (CONTRACT §5.1). Bootstrap converges SPIRE to exactly this list.
+# account  uid   SPIFFE ID                      X509-SVID TTL (s; 0 = server default 1h)
+# `intruder` (uid 1004) is deliberately absent.
+# The TTLs equal the per-identity SSH certificate maximum of CONTRACT §5.2: an
+# SSH certificate can never outlive the SVID it was requested with (DECISIONS D-11).
+deployer   1001  spiffe://lab/client/deployer   300
+monitor    1002  spiffe://lab/client/monitor    900
+stranger   1003  spiffe://lab/client/stranger   0

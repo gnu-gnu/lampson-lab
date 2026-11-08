@@ -1,0 +1,19 @@
+# Keys, certificates and tokens live only in docker volumes. These patterns
+# keep any copy that lands in the working tree out of git (CONTRACT AC-22).
+*.key
+*.pem
+*.crt
+*.der
+*.p12
+*join_token*
+# SPIRE KeyManager "disk" files (private keys inside JSON) and datastores
+keys.json
+agent-data.json
+*.sqlite3*
+/secrets/
+/out/
+# step-ca (P2): key files have no extension; config and secrets stay in volumes
+*.jwk
+*_key
+**/secrets/
+ca.json

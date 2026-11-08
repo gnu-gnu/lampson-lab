@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# lab-ssh-cert [--ttl <duration>] [--from <time>] [--out <prefix>] <principal>...
+#
+# Requests an SSH user certificate for the calling account:
+#   1. fetch this uid's X.509-SVID from the SPIRE agent
+#   2. sign an X5C token with the SVID key and ask step-ca (provisioner
+#      x5c-spire) for a certificate with the given principals
+#
+# The key id sent is the SVID's own SPIFFE ID; step-ca derives identity from the
+# verified SVID, not from anything this script sends (step/templates/ssh-user.tpl).
+# On success prints the certificate path (<prefix>-cert.pub; key at <prefix>).
+set -euo pipefail
+
+usage() { echo "usage: lab-ssh-cert [--ttl <duration>] [--from <time>] [--out <prefix>] <principal>..." >&2; exit 2; }
+
+ttl='' from='' out="${HOME}/.lab-ssh/id_ecdsa"
+while (($#)); do
+  case $1 in
+    --ttl) ttl=${2:?}; shift 2 ;;
+    --from) from=${2:?}; shift 2 ;;   # validity start, e.g. -2m
+    --out) out=${2:?}; shift 2 ;;
+    --) shift; break ;;
+    -*) usage ;;
+    *) break ;;
+  esac
+done
+(($#)) || usage
+
+: "${SPIRE_AGENT_SOCKET:?}" "${STEP_CA_URL:?}" "${STEP_CA_ROOT:?}"
+
+svid=$(mktemp -d)
+trap 'rm -rf "$svid"' EXIT
+spire-agent api fetch x509 -silent -timeout 10s -socketPath "$SPIRE_AGENT_SOCKET" -write "$svid" >/dev/null \
+  || { echo "lab-ssh-cert: no SVID for uid $(id -u)" >&2; exit 1; }
+
+id=$(step certificate inspect --format json "${svid}/svid.0.pem" \
+  | jq -r '.extensions.subject_alt_name.uniform_resource_identifiers[0] // empty')
+[[ -n $id ]] || { echo "lab-ssh-cert: SVID has no SPIFFE ID" >&2; exit 1; }
+
+principals=()
+for p in "$@"; do principals+=(--principal "$p"); done
+
+mkdir -p "$(dirname "$out")"
+step ssh certificate "$id" "$out" "${principals[@]}" \
+  --provisioner x5c-spire \
+  --x5c-cert "${svid}/svid.0.pem" --x5c-key "${svid}/svid.0.key" \
+  --ca-url "$STEP_CA_URL" --root "$STEP_CA_ROOT" \
+  ${ttl:+--not-after "$ttl"} ${from:+--not-before "$from"} \
+  --no-password --insecure --no-agent --force >&2
+
+echo "${out}-cert.pub"

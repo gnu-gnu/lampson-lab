@@ -1,0 +1,5 @@
+# Role account privileges (CONTRACT §5.3). Installed as /etc/sudoers.d/lab-roles.
+admin    ALL=(ALL:ALL) NOPASSWD: ALL
+# operator may run exactly this command, as root, with no arguments.
+operator ALL=(root) NOPASSWD: /usr/local/bin/demo-restart ""
+# readonly: no sudo at all.
