@@ -4,46 +4,6 @@
 
 > 이름은 Butler Lampson에게서 따왔습니다. 그의 "speaks for" 모델이 이 랩이 구현하는 체인을 설명합니다: 워크로드 → 신원 → 역할 → 계정.
 
-## 동작 구조
-
-```mermaid
-sequenceDiagram
-  participant B as bootstrap
-  participant U as client<br/>lab-login (uid 1001)
-  participant A as spire-agent
-  participant S as spire-server
-  participant CA as step-ca<br/>x5c-spire
-  participant H as sshd 호스트<br/>host-billing
-
-  rect rgba(128, 128, 128, 0.12)
-    Note over B,H: 준비 (make up 때)
-    B->>S: 랩 루트로 서명한 SPIRE intermediate,<br/>entry 등록 (uid → SPIFFE ID)
-    B->>CA: X5C 신뢰 루트 = 랩 루트,<br/>SPIFFE ID → principal 매핑, policy
-    B->>H: step-ca SSH user CA 공개키
-    S-->>A: entry별 SVID 서명 (5분, 계속 갱신)
-  end
-
-  Note over U,H: 접속할 때마다
-  U->>A: 1. SVID 요청 (Workload API, 신원은 적지 않음)
-  Note over A: 커널에서 호출자 uid 확인 → entry 매칭<br/>entry 없음 → 거부 (intruder)
-  A-->>U: 2. X.509-SVID spiffe://lab/client/deployer
-  U->>CA: 3. SSH 인증서 요청 (SVID 키로 서명한 X5C 토큰)
-  Note over CA: SVID 체인 → 랩 루트 검증<br/>SPIFFE ID → principal 매핑 (없으면 거부: stranger)<br/>policy (role-admin 거부), 수명 ≤ 5분, ≤ SVID 만료
-  CA-->>U: 4. SSH 인증서 (KeyID = SPIFFE ID,<br/>principal role-operator@billing)
-  U->>H: 5. ssh operator@host-billing (그 인증서로만)
-  Note over H: user CA 서명, 유효기간 확인<br/>principal → 역할 계정 (operator)
-  H-->>U: 6. 세션 (열린 지 60분이면 호스트가 끊음)
-```
-
-준비 단계는 `make up`이 한 번 합니다. 신뢰 관계를 심는 단계입니다. 그 뒤로 접속할 때마다 아래 순서를 밟습니다 (`lab-login`이 1~5를 한 번에 합니다).
-
-1. client의 계정이 spire-agent에 SVID를 요청합니다. 요청에는 신원을 적는 곳이 없습니다.
-2. agent는 커널에서 호출한 프로세스의 uid를 확인하고, 등록된 entry와 맞으면 그 SVID를 줍니다. entry가 없는 uid(intruder)는 여기서 거부됩니다.
-3. client가 SVID 키로 서명한 X5C 토큰으로 step-ca에 SSH 인증서를 요청합니다.
-4. step-ca가 SVID 체인을 랩 루트로 검증합니다. 이어서 SPIFFE ID를 매핑해 principal을 정하고, policy와 수명 상한을 적용해 서명합니다. 매핑이 없는 신원(stranger)과 `role-admin@*`은 여기서 거부됩니다.
-5. 그 인증서로만 호스트에 접속합니다. 호스트는 step-ca의 SSH user CA만 믿고, principal로 어느 역할 계정에 들어갈 수 있는지 정합니다.
-6. 세션이 열립니다. 인증서가 만료돼도 열린 세션은 유지되지만, 연결이 열린 지 60분이 지나면 호스트가 끊습니다.
-
 ## Quick Start
 
 필요한 것: Docker (Compose v2 이상), `make`. 테스트까지 돌리려면 [사용법](#사용법)의 목록을 보세요.
@@ -53,14 +13,14 @@ $ git clone https://github.com/gnu-gnu/lampson-lab.git && cd lampson-lab
 $ make up          # 빌드, 기동, bootstrap까지. 끝나면 "lab is up"
 ```
 
-헬퍼(`lab-login`) 없이 기본 도구(`spire-agent`, `step`, `ssh`)로 위 그림의 단계를 하나씩 밟아 봅니다. 터미널을 두 개 엽니다. 하나는 client 안(deployer)이고, 다른 하나는 저장소 디렉터리에서 호스트 로그를 보는 용도입니다.
+헬퍼(`lab-login`) 없이 기본 도구(`spire-agent`, `step`, `ssh`)로 아래 [동작 구조](#동작-구조)의 단계를 하나씩 밟아 봅니다. SVID, X5C, principal 같은 용어가 낯설면 그 절의 [등장하는 것들](#등장하는-것들)을 먼저 보세요. 터미널을 두 개 엽니다. 하나는 client 안(deployer)이고, 다른 하나는 저장소 디렉터리에서 호스트 로그를 보는 용도입니다.
 
 ```
 $ docker compose exec -u deployer client bash
 deployer$ cd "$(mktemp -d)"
 ```
 
-**1. SVID 받기 (그림의 1~2).** agent가 이 프로세스의 uid를 보고 SVID를 줍니다. 요청에는 신원을 적는 곳이 없습니다.
+**1. SVID 받기 (동작 구조의 1~2).** agent가 이 프로세스의 uid를 보고 SVID를 줍니다. 요청에는 신원을 적는 곳이 없습니다.
 
 ```
 deployer$ spire-agent api fetch x509 -socketPath "$SPIRE_AGENT_SOCKET" -write .
@@ -70,7 +30,7 @@ deployer$ step certificate inspect --short svid.0.pem
           to:  ...T14:49:15Z            # 5분짜리, 절반쯤 지나면 agent가 새로 받음
 ```
 
-**2. 단기 SSH 인증서 서명 요청 (그림의 3~4).** SVID 키로 서명한 X5C 토큰을 보내면, step-ca가 SVID를 검증하고 SSH 인증서를 서명합니다. `--not-after`로 수명을 정합니다(최대 5분, 그리고 SVID 만료 전까지).
+**2. 단기 SSH 인증서 서명 요청 (동작 구조의 3~4).** SVID 키로 서명한 X5C 토큰을 보내면, step-ca가 SVID를 검증하고 SSH 인증서를 서명합니다. `--not-after`로 수명을 정합니다(최대 5분, 그리고 SVID 만료 전까지).
 
 ```
 deployer$ x5c=(--provisioner x5c-spire --x5c-cert svid.0.pem --x5c-key svid.0.key
@@ -95,7 +55,7 @@ deployer$ ssh-keygen -L -f id_ecdsa-cert.pub
 | stranger 계정으로 1·2단계 | SVID는 받지만 `spiffe://lab/client/stranger has no SSH mapping` |
 | intruder 계정으로 1단계 | `PermissionDenied desc = no identity issued` (SVID 자체가 없음) |
 
-**3. 그 인증서로 접속 (그림의 5~6).** 다른 키나 agent를 쓰지 않도록 지정합니다.
+**3. 그 인증서로 접속 (동작 구조의 5~6).** 다른 키나 agent를 쓰지 않도록 지정합니다.
 
 ```
 deployer$ o=(-i id_ecdsa -o CertificateFile=id_ecdsa-cert.pub -o IdentitiesOnly=yes -o IdentityAgent=none
@@ -118,6 +78,87 @@ Certificate does not contain an authorized principal      # admin@ 시도
 `Valid ... to` 시각이 지난 뒤 같은 `ssh` 명령을 다시 실행하면 `Permission denied`가 나오고, 호스트 로그에 `Certificate invalid: expired`가 남습니다 (AC-19). 1분짜리(`--not-after 1m`)로 받으면 금방 확인할 수 있습니다. 반대로 만료 전에 열어 둔 세션은 계속 유지됩니다 ([인증서 만료와 열린 세션](#인증서-만료와-열린-세션-ac-20)). 끝나면 `rm -rf "$PWD"; exit`으로 임시 디렉터리(SVID 키, SSH 키)를 지우고 나옵니다. 지우지 않아도 client 컨테이너와 함께 `make down` 때 사라집니다.
 
 헬퍼로 한 번에 하려면 `lab-login role-operator@billing operator@host-billing`입니다 ([사용법](#사용법)). 랩을 지우려면 `make down`을 실행합니다. 컨테이너, 볼륨, 생성된 키가 모두 사라집니다.
+
+## 동작 구조
+
+한 줄로 말하면, **"어느 계정에서 실행된 프로세스인가"를 증명서(SVID)로 바꾸고, 그 증명서를 5분짜리 SSH 인증서로 바꿔서, 호스트의 역할 계정으로 들어갑니다.** 사람이나 프로세스가 오래 쓰는 SSH 키는 어디에도 없습니다.
+
+### 등장하는 것들
+
+| 이름 | 하는 일 |
+|---|---|
+| **client** | 접속하는 쪽 컨테이너. 리눅스 계정이 넷 있습니다: deployer, monitor, stranger, intruder. 계정은 커널이 숫자(uid)로 구별합니다 |
+| **spire-server / spire-agent** ([SPIRE](https://spiffe.io/)) | 프로세스에 신원 증명서를 주는 시스템. server가 증명서를 서명하고, agent는 client 옆에서 "지금 요청한 프로세스가 누구인지" 확인해 증명서를 나눠 줍니다 |
+| **SPIFFE ID** | 워크로드의 이름. `spiffe://lab/client/deployer`처럼 URI 형식입니다 |
+| **SVID** | SPIFFE ID가 들어간 X.509 인증서와 그 개인키. "이 프로세스는 deployer다"라는 짧게 사는 증명서입니다(deployer 5분, monitor 15분) |
+| **step-ca** ([smallstep](https://smallstep.com/docs/step-ca/)) | SSH 인증서를 서명하는 CA. 이 랩에서는 SVID를 제시한 요청만 받습니다(provisioner `x5c-spire`) |
+| **X5C 토큰** | 요청서. SVID 인증서를 첨부하고 SVID 개인키로 서명한 토큰(JWT)입니다. 서명이 맞으면 "그 SVID의 주인이 보낸 요청"임이 증명됩니다 |
+| **SSH 인증서** | CA가 서명한 SSH 공개키. 유효기간과 principal이 적혀 있어서, 호스트는 CA만 믿으면 사용자 키를 하나하나 등록할 필요가 없습니다 |
+| **principal** | SSH 인증서에 적힌 "이 인증서로 들어갈 수 있는 이름". 이 랩은 `role-<역할>@<호스트 그룹>` 형식입니다(예: `role-operator@billing`) |
+| **sshd 호스트** | 접속 대상. host-billing(그룹 billing)과 host-crm(그룹 crm). 개인 계정 없이 역할 계정 `admin` / `operator` / `readonly`만 있습니다 |
+| **bootstrap** | `make up` 때 실행되는 준비 스크립트. 아래 "준비" 단계를 합니다 |
+
+### 순서
+
+```mermaid
+sequenceDiagram
+  participant B as bootstrap
+  participant U as client<br/>lab-login (uid 1001)
+  participant A as spire-agent
+  participant S as spire-server
+  participant CA as step-ca<br/>x5c-spire
+  participant H as sshd 호스트<br/>host-billing
+
+  rect rgba(128, 128, 128, 0.12)
+    Note over B,H: 준비 (make up 때)
+    B->>S: 랩 루트로 서명한 SPIRE intermediate,<br/>entry 등록 (uid → SPIFFE ID)
+    B->>CA: X5C 신뢰 루트 = 랩 루트,<br/>SPIFFE ID → principal 매핑, policy
+    B->>H: step-ca SSH user CA 공개키
+    S-->>A: entry별 SVID 서명 (수명 짧음, 계속 갱신)
+  end
+
+  Note over U,H: 접속할 때마다
+  U->>A: 1. SVID 요청 (Workload API, 신원은 적지 않음)
+  Note over A: 커널에서 호출자 uid 확인 → entry 매칭<br/>entry 없음 → 거부 (intruder)
+  A-->>U: 2. X.509-SVID spiffe://lab/client/deployer
+  U->>CA: 3. SSH 인증서 요청 (SVID 키로 서명한 X5C 토큰)
+  Note over CA: SVID 체인 → 랩 루트 검증<br/>SPIFFE ID → principal 매핑 (없으면 거부: stranger)<br/>policy (role-admin 거부), 수명 ≤ 5분, ≤ SVID 만료
+  CA-->>U: 4. SSH 인증서 (KeyID = SPIFFE ID,<br/>principal role-operator@billing)
+  U->>H: 5. ssh operator@host-billing (그 인증서로만)
+  Note over H: user CA 서명, 유효기간 확인<br/>principal → 역할 계정 (operator)
+  H-->>U: 6. 세션 (열린 지 60분이면 호스트가 끊음)
+```
+
+**준비 (`make up` 때 한 번).** 누가 누구를 믿을지 정해 두는 단계입니다.
+
+- bootstrap이 **랩 루트 CA**를 만들고, 그 키로 SPIRE의 중간 인증서(intermediate)를 서명합니다. 그래서 SPIRE가 내주는 SVID는 모두 랩 루트까지 이어지는 서명 체인을 가집니다.
+- SPIRE에 **entry**를 등록합니다. "uid 1001에게는 `spiffe://lab/client/deployer`" 같은, 계정과 SPIFFE ID의 대응표입니다.
+- step-ca에 다음을 넣습니다.
+  - **신뢰할 루트:** 랩 루트 하나만 믿습니다. 그래서 SPIRE가 낸 SVID만 받아들입니다.
+  - **매핑:** SPIFFE ID별로 어떤 principal을 줄지 정합니다. 예를 들어 deployer는 `role-operator@billing`입니다.
+  - **policy:** 무슨 일이 있어도 주지 않을 principal을 정합니다. `role-admin@*`이 여기에 해당합니다.
+- 호스트에는 step-ca의 **SSH user CA 공개키**만 심습니다. `authorized_keys`는 쓰지 않으므로, step-ca가 서명한 인증서가 아니면 들어갈 수 없습니다.
+- 이후 spire-server는 entry마다 SVID를 서명해 agent에 내려 주고, 만료 전에 계속 새로 발급합니다.
+
+**접속할 때마다.** 아래는 deployer가 host-billing에 들어가는 경우입니다. `lab-login`이 1~5를 한 번에 하고, 아래 [Quick Start](#quick-start)에서 같은 과정을 한 단계씩 직접 해 볼 수 있습니다.
+
+1. **SVID 요청.** deployer 계정으로 실행된 프로세스가 agent의 소켓(Workload API)에 "내 증명서를 달라"고 요청합니다. 요청에는 "나는 deployer다" 같은 내용을 적는 칸이 없습니다.
+2. **agent의 신원 확인과 SVID 전달.** agent는 소켓 반대편 프로세스의 uid를 **커널에 직접 물어봅니다**. 그래서 프로세스가 거짓말을 할 여지가 없습니다. uid 1001은 entry에 있으므로 deployer의 SVID와 개인키를 돌려줍니다. entry에 없는 계정(intruder)은 여기서 아무것도 받지 못합니다.
+3. **SSH 인증서 요청.** 프로세스는 이번 접속에만 쓸 SSH 키 쌍을 새로 만들고, 그 공개키를 X5C 토큰과 함께 step-ca에 보냅니다. X5C 토큰은 SVID를 첨부하고 SVID 개인키로 서명한 요청서라서, SVID 개인키를 가진 쪽만 만들 수 있습니다.
+4. **step-ca의 검사와 서명.** step-ca는 아래를 차례로 확인한 뒤, 요청이 고른 이름이 아니라 **매핑이 정한 principal**로 SSH 인증서를 서명합니다.
+   1. 첨부된 SVID가 랩 루트까지 이어지는지(= SPIRE가 낸 것인지)
+   2. 토큰 서명이 그 SVID의 키로 된 것인지, 이미 한 번 쓴 토큰이 아닌지
+   3. 그 SPIFFE ID에 매핑이 있는지. 없으면 거부합니다(stranger).
+   4. policy에 걸리지 않는지. `role-admin@*`은 거부합니다.
+   5. 수명이 5분 이하이고 SVID 만료 전인지
+
+   인증서의 KeyID에는 SPIFFE ID가 들어가서, 나중에 호스트 로그에서 누가 접속했는지 알 수 있습니다.
+5. **접속.** 받은 인증서로만 `operator@host-billing`에 ssh합니다. 호스트는 다음을 확인합니다.
+   - 인증서가 step-ca의 SSH user CA로 서명됐고 유효기간 안인지
+   - 인증서의 principal이 그 역할 계정에 허용된 이름인지. operator 계정은 `role-operator@billing`만 받습니다.
+
+   그래서 같은 인증서로도 `admin@host-billing`이나 `operator@host-crm`에는 들어갈 수 없습니다.
+6. **세션.** 접속에 성공하면 operator 계정의 권한으로 일합니다. 인증서는 접속하는 순간에만 확인하므로, 5분이 지나 인증서가 만료돼도 이미 열린 세션은 이어집니다. 대신 연결이 열린 지 60분이 지나면 호스트가 끊습니다. 다시 들어가려면 1번부터 새로 합니다.
 
 ## 무엇을 보여 주는가
 
