@@ -44,6 +44,81 @@ sequenceDiagram
 5. 그 인증서로만 호스트에 접속합니다. 호스트는 step-ca의 SSH user CA만 믿고, principal로 어느 역할 계정에 들어갈 수 있는지 정합니다.
 6. 세션이 열립니다. 인증서가 만료돼도 열린 세션은 유지되지만, 연결이 열린 지 60분이 지나면 호스트가 끊습니다.
 
+## Quick Start
+
+필요한 것: Docker (Compose v2 이상), `make`. 테스트까지 돌리려면 [사용법](#사용법)의 목록을 보세요.
+
+```
+$ git clone https://github.com/gnu-gnu/lampson-lab.git && cd lampson-lab
+$ make up          # 빌드, 기동, bootstrap까지. 끝나면 "lab is up"
+```
+
+헬퍼(`lab-login`) 없이 기본 도구(`spire-agent`, `step`, `ssh`)로 위 그림의 단계를 하나씩 밟아 봅니다. 터미널을 두 개 엽니다. 하나는 client 안(deployer)이고, 다른 하나는 저장소 디렉터리에서 호스트 로그를 보는 용도입니다.
+
+```
+$ docker compose exec -u deployer client bash
+deployer$ cd "$(mktemp -d)"
+```
+
+**1. SVID 받기 (그림의 1~2).** agent가 이 프로세스의 uid를 보고 SVID를 줍니다. 요청에는 신원을 적는 곳이 없습니다.
+
+```
+deployer$ spire-agent api fetch x509 -socketPath "$SPIRE_AGENT_SOCKET" -write .
+deployer$ step certificate inspect --short svid.0.pem
+  Subject:     spiffe://lab/client/deployer
+  Valid from:  ...T14:44:05Z
+          to:  ...T14:49:15Z            # 5분짜리, 절반쯤 지나면 agent가 새로 받음
+```
+
+**2. 단기 SSH 인증서 서명 요청 (그림의 3~4).** SVID 키로 서명한 X5C 토큰을 보내면, step-ca가 SVID를 검증하고 SSH 인증서를 서명합니다. `--not-after`로 수명을 정합니다(최대 5분, 그리고 SVID 만료 전까지).
+
+```
+deployer$ x5c=(--provisioner x5c-spire --x5c-cert svid.0.pem --x5c-key svid.0.key
+               --ca-url "$STEP_CA_URL" --root "$STEP_CA_ROOT" --no-password --insecure --no-agent)
+deployer$ step ssh certificate spiffe://lab/client/deployer id_ecdsa \
+            --principal role-operator@billing --not-after 2m "${x5c[@]}"
+deployer$ ssh-keygen -L -f id_ecdsa-cert.pub
+        Key ID: "spiffe://lab/client/deployer"
+        Serial: 16374253206351982465
+        Valid: from ...T14:44:25 to ...T14:46:25
+        Principals:
+                role-operator@billing
+```
+
+거부되는 요청도 해 볼 수 있습니다. 모두 rc 1이고 인증서 파일이 만들어지지 않습니다.
+
+| 요청 | step-ca 응답 |
+|---|---|
+| `--principal role-admin@billing` | `role-admin@billing is never issued` |
+| `spiffe://lab/client/monitor` (다른 계정의 key id) | `key id "spiffe://lab/client/monitor" is not the SVID's SPIFFE ID ...` |
+| `--not-after 10m` | 거부. SVID가 그보다 먼저 만료되면 `provisioning credential expiration ... is before requested certificate validBefore`가 나오고, 그렇지 않으면 5분 상한 위반으로 거부됩니다 (AC-09) |
+| stranger 계정으로 1·2단계 | SVID는 받지만 `spiffe://lab/client/stranger has no SSH mapping` |
+| intruder 계정으로 1단계 | `PermissionDenied desc = no identity issued` (SVID 자체가 없음) |
+
+**3. 그 인증서로 접속 (그림의 5~6).** 다른 키나 agent를 쓰지 않도록 지정합니다.
+
+```
+deployer$ o=(-i id_ecdsa -o CertificateFile=id_ecdsa-cert.pub -o IdentitiesOnly=yes -o IdentityAgent=none
+             -o StrictHostKeyChecking=accept-new)
+deployer$ ssh "${o[@]}" operator@host-billing 'id; hostname'
+uid=1001(operator) gid=1001(lab-operator) groups=1001(lab-operator)
+host-billing
+deployer$ ssh "${o[@]}" admin@host-billing true     # Permission denied (principal 불일치)
+deployer$ ssh "${o[@]}" operator@host-crm true      # Permission denied (crm principal 없음)
+```
+
+호스트 쪽 터미널에서는 같은 serial을 확인합니다.
+
+```
+$ docker compose logs --no-log-prefix host-billing | grep -E 'Accepted publickey|authorized principal|expired'
+Accepted publickey for operator ... ID spiffe://lab/client/deployer (serial 16374253206351982465) ...
+Certificate does not contain an authorized principal      # admin@ 시도
+```
+
+`Valid ... to` 시각이 지난 뒤 같은 `ssh` 명령을 다시 실행하면 `Permission denied`가 나오고, 호스트 로그에 `Certificate invalid: expired`가 남습니다 (AC-19). 1분짜리(`--not-after 1m`)로 받으면 금방 확인할 수 있습니다. 반대로 만료 전에 열어 둔 세션은 계속 유지됩니다 ([인증서 만료와 열린 세션](#인증서-만료와-열린-세션-ac-20)). 끝나면 `rm -rf "$PWD"; exit`으로 임시 디렉터리(SVID 키, SSH 키)를 지우고 나옵니다. 지우지 않아도 client 컨테이너와 함께 `make down` 때 사라집니다.
+
+헬퍼로 한 번에 하려면 `lab-login role-operator@billing operator@host-billing`입니다 ([사용법](#사용법)). 랩을 지우려면 `make down`을 실행합니다. 컨테이너, 볼륨, 생성된 키가 모두 사라집니다.
+
 ## 무엇을 보여 주는가
 
 1. **신원은 프로세스에서 나옵니다.** client 컨테이너의 계정(uid)마다 SPIRE가 X.509-SVID를 줍니다. 등록되지 않은 계정(intruder)은 아무것도 받지 못합니다.
@@ -85,72 +160,6 @@ $ docker compose logs host-billing | grep Accepted                    # KeyID(SP
 ```
 
 `lab-login <principal> <user@host> [command]`은 현재 uid로 SVID를 받고, `x5c-spire`에서 SSH 인증서를 받은 뒤, 그 인증서만으로 접속합니다 (다른 키와 agent는 쓰지 않음).
-
-### 단계별로 직접 해 보기 (헬퍼 없이)
-
-`lab-login`이 하는 세 단계를 기본 도구(`spire-agent`, `step`, `ssh`)로 하나씩 실행해 봅니다. 터미널을 두 개 엽니다. 하나는 client 안(deployer)이고, 다른 하나는 `docker compose`를 실행하는 곳에서 호스트 로그를 보는 용도입니다.
-
-```
-$ docker compose exec -u deployer client bash
-deployer$ cd "$(mktemp -d)"
-```
-
-**1. SVID 받기 (SPIRE).** agent가 이 프로세스의 uid를 보고 SVID를 줍니다. 요청에는 신원을 적는 곳이 없습니다.
-
-```
-deployer$ spire-agent api fetch x509 -socketPath "$SPIRE_AGENT_SOCKET" -write .
-deployer$ step certificate inspect --short svid.0.pem
-  Subject:     spiffe://lab/client/deployer
-  Valid from:  ...T14:44:05Z
-          to:  ...T14:49:15Z            # 5분짜리, 절반쯤 지나면 agent가 새로 받음
-```
-
-**2. 단기 SSH 인증서 서명 요청 (step-ca `x5c-spire`).** SVID 키로 서명한 X5C 토큰을 보내면, step-ca가 SVID를 검증하고 SSH 인증서를 서명합니다. `--not-after`로 수명을 정합니다(최대 5분, 그리고 SVID 만료 전까지).
-
-```
-deployer$ x5c=(--provisioner x5c-spire --x5c-cert svid.0.pem --x5c-key svid.0.key
-               --ca-url "$STEP_CA_URL" --root "$STEP_CA_ROOT" --no-password --insecure --no-agent)
-deployer$ step ssh certificate spiffe://lab/client/deployer id_ecdsa \
-            --principal role-operator@billing --not-after 2m "${x5c[@]}"
-deployer$ ssh-keygen -L -f id_ecdsa-cert.pub
-        Key ID: "spiffe://lab/client/deployer"
-        Serial: 16374253206351982465
-        Valid: from ...T14:44:25 to ...T14:46:25
-        Principals:
-                role-operator@billing
-```
-
-거부되는 요청도 해 볼 수 있습니다. 모두 rc 1이고 인증서 파일이 만들어지지 않습니다.
-
-| 요청 | step-ca 응답 |
-|---|---|
-| `--principal role-admin@billing` | `role-admin@billing is never issued` |
-| `spiffe://lab/client/monitor` (다른 계정의 key id) | `key id "spiffe://lab/client/monitor" is not the SVID's SPIFFE ID ...` |
-| `--not-after 10m` | 거부. SVID가 그보다 먼저 만료되면 `provisioning credential expiration ... is before requested certificate validBefore`가 나오고, 그렇지 않으면 5분 상한 위반으로 거부됩니다 (AC-09) |
-| stranger 계정으로 1·2단계 | SVID는 받지만 `spiffe://lab/client/stranger has no SSH mapping` |
-| intruder 계정으로 1단계 | `PermissionDenied desc = no identity issued` (SVID 자체가 없음) |
-
-**3. 그 인증서로 접속.** 다른 키나 agent를 쓰지 않도록 지정합니다.
-
-```
-deployer$ o=(-i id_ecdsa -o CertificateFile=id_ecdsa-cert.pub -o IdentitiesOnly=yes -o IdentityAgent=none
-             -o StrictHostKeyChecking=accept-new)
-deployer$ ssh "${o[@]}" operator@host-billing 'id; hostname'
-uid=1001(operator) gid=1001(lab-operator) groups=1001(lab-operator)
-host-billing
-deployer$ ssh "${o[@]}" admin@host-billing true     # Permission denied (principal 불일치)
-deployer$ ssh "${o[@]}" operator@host-crm true      # Permission denied (crm principal 없음)
-```
-
-호스트 쪽 터미널에서는 같은 serial을 확인합니다.
-
-```
-$ docker compose logs --no-log-prefix host-billing | grep -E 'Accepted publickey|authorized principal|expired'
-Accepted publickey for operator ... ID spiffe://lab/client/deployer (serial 16374253206351982465) ...
-Certificate does not contain an authorized principal      # admin@ 시도
-```
-
-`Valid ... to` 시각이 지난 뒤 같은 `ssh` 명령을 다시 실행하면 `Permission denied`가 나오고, 호스트 로그에 `Certificate invalid: expired`가 남습니다 (AC-19). 1분짜리(`--not-after 1m`)로 받으면 금방 확인할 수 있습니다. 반대로 만료 전에 열어 둔 세션은 계속 유지됩니다 (아래 AC-20). 끝나면 `rm -rf "$PWD"; exit`으로 임시 디렉터리(SVID 키, SSH 키)를 지우고 나옵니다. 지우지 않아도 client 컨테이너와 함께 `make down` 때 사라집니다.
 
 `docker compose up`만 단독으로 실행하지 말고 `make up`을 쓰세요. `make up`은 bootstrap의 PKI 단계를 먼저 실행한 뒤 나머지를 띄웁니다. `docker compose up`만 하면 bootstrap이 PKI를 만드는 것과 spire-server가 upstream 인증서를 찾는 것이 경쟁해서, 결과가 실행마다 달라집니다.
 
