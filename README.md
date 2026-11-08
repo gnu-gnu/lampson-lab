@@ -83,23 +83,6 @@ Certificate does not contain an authorized principal      # admin@ 시도
 
 한 줄로 말하면, **"어느 계정에서 실행된 프로세스인가"를 증명서(SVID)로 바꾸고, 그 증명서를 5분짜리 SSH 인증서로 바꿔서, 호스트의 역할 계정으로 들어갑니다.** 사람이나 프로세스가 오래 쓰는 SSH 키는 어디에도 없습니다.
 
-### 등장하는 것들
-
-| 이름 | 하는 일 |
-|---|---|
-| **client** | 접속하는 쪽 컨테이너. 리눅스 계정이 넷 있습니다: deployer, monitor, stranger, intruder. 계정은 커널이 숫자(uid)로 구별합니다 |
-| **spire-server / spire-agent** ([SPIRE](https://spiffe.io/)) | 프로세스에 신원 증명서를 주는 시스템. server가 증명서를 서명하고, agent는 client 옆에서 "지금 요청한 프로세스가 누구인지" 확인해 증명서를 나눠 줍니다 |
-| **SPIFFE ID** | 워크로드의 이름. `spiffe://lab/client/deployer`처럼 URI 형식입니다 |
-| **SVID** | SPIFFE ID가 들어간 X.509 인증서와 그 개인키. "이 프로세스는 deployer다"라는 짧게 사는 증명서입니다(deployer 5분, monitor 15분) |
-| **step-ca** ([smallstep](https://smallstep.com/docs/step-ca/)) | SSH 인증서를 서명하는 CA. 이 랩에서는 SVID를 제시한 요청만 받습니다(provisioner `x5c-spire`) |
-| **X5C 토큰** | 요청서. SVID 인증서를 첨부하고 SVID 개인키로 서명한 토큰(JWT)입니다. 서명이 맞으면 "그 SVID의 주인이 보낸 요청"임이 증명됩니다 |
-| **SSH 인증서** | CA가 서명한 SSH 공개키. 유효기간과 principal이 적혀 있어서, 호스트는 CA만 믿으면 사용자 키를 하나하나 등록할 필요가 없습니다 |
-| **principal** | SSH 인증서에 적힌 "이 인증서로 들어갈 수 있는 이름". 이 랩은 `role-<역할>@<호스트 그룹>` 형식입니다(예: `role-operator@billing`) |
-| **sshd 호스트** | 접속 대상. host-billing(그룹 billing)과 host-crm(그룹 crm). 개인 계정 없이 역할 계정 `admin` / `operator` / `readonly`만 있습니다 |
-| **bootstrap** | `make up` 때 실행되는 준비 스크립트. 아래 "준비" 단계를 합니다 |
-
-### 순서
-
 ```mermaid
 sequenceDiagram
   participant B as bootstrap
@@ -129,6 +112,23 @@ sequenceDiagram
   H-->>U: 6. 세션 (열린 지 60분이면 호스트가 끊음)
 ```
 
+### 등장하는 것들
+
+| 이름 | 하는 일 |
+|---|---|
+| **client** | 접속하는 쪽 컨테이너. 리눅스 계정이 넷 있습니다: deployer, monitor, stranger, intruder. 계정은 커널이 숫자(uid)로 구별합니다 |
+| **spire-server / spire-agent** ([SPIRE](https://spiffe.io/)) | 프로세스에 신원 증명서를 주는 시스템. server가 증명서를 서명하고, agent는 client 옆에서 "지금 요청한 프로세스가 누구인지" 확인해 증명서를 나눠 줍니다 |
+| **SPIFFE ID** | 워크로드의 이름. `spiffe://lab/client/deployer`처럼 URI 형식입니다 |
+| **SVID** | SPIFFE ID가 들어간 X.509 인증서와 그 개인키. "이 프로세스는 deployer다"라는 짧게 사는 증명서입니다(deployer 5분, monitor 15분) |
+| **step-ca** ([smallstep](https://smallstep.com/docs/step-ca/)) | SSH 인증서를 서명하는 CA. 이 랩에서는 SVID를 제시한 요청만 받습니다(provisioner `x5c-spire`) |
+| **X5C 토큰** | 요청서. SVID 인증서를 첨부하고 SVID 개인키로 서명한 토큰(JWT)입니다. 서명이 맞으면 "그 SVID의 주인이 보낸 요청"임이 증명됩니다 |
+| **SSH 인증서** | CA가 서명한 SSH 공개키. 유효기간과 principal이 적혀 있어서, 호스트는 CA만 믿으면 사용자 키를 하나하나 등록할 필요가 없습니다 |
+| **principal** | SSH 인증서에 적힌 "이 인증서로 들어갈 수 있는 이름". 이 랩은 `role-<역할>@<호스트 그룹>` 형식입니다(예: `role-operator@billing`) |
+| **sshd 호스트** | 접속 대상. host-billing(그룹 billing)과 host-crm(그룹 crm). 개인 계정 없이 역할 계정 `admin` / `operator` / `readonly`만 있습니다 |
+| **bootstrap** | `make up` 때 실행되는 준비 스크립트. 아래 "준비" 단계를 합니다 |
+
+### 단계별 설명
+
 **준비 (`make up` 때 한 번).** 누가 누구를 믿을지 정해 두는 단계입니다.
 
 - bootstrap이 **랩 루트 CA**를 만들고, 그 키로 SPIRE의 중간 인증서(intermediate)를 서명합니다. 그래서 SPIRE가 내주는 SVID는 모두 랩 루트까지 이어지는 서명 체인을 가집니다.
@@ -140,7 +140,7 @@ sequenceDiagram
 - 호스트에는 step-ca의 **SSH user CA 공개키**만 심습니다. `authorized_keys`는 쓰지 않으므로, step-ca가 서명한 인증서가 아니면 들어갈 수 없습니다.
 - 이후 spire-server는 entry마다 SVID를 서명해 agent에 내려 주고, 만료 전에 계속 새로 발급합니다.
 
-**접속할 때마다.** 아래는 deployer가 host-billing에 들어가는 경우입니다. `lab-login`이 1~5를 한 번에 하고, 아래 [Quick Start](#quick-start)에서 같은 과정을 한 단계씩 직접 해 볼 수 있습니다.
+**접속할 때마다.** 아래는 deployer가 host-billing에 들어가는 경우입니다. `lab-login`이 1~5를 한 번에 하고, 위 [Quick Start](#quick-start)에서 같은 과정을 한 단계씩 직접 해 볼 수 있습니다.
 
 1. **SVID 요청.** deployer 계정으로 실행된 프로세스가 agent의 소켓(Workload API)에 "내 증명서를 달라"고 요청합니다. 요청에는 "나는 deployer다" 같은 내용을 적는 칸이 없습니다.
 2. **agent의 신원 확인과 SVID 전달.** agent는 소켓 반대편 프로세스의 uid를 **커널에 직접 물어봅니다**. 그래서 프로세스가 거짓말을 할 여지가 없습니다. uid 1001은 entry에 있으므로 deployer의 SVID와 개인키를 돌려줍니다. entry에 없는 계정(intruder)은 여기서 아무것도 받지 못합니다.
