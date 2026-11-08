@@ -7,45 +7,42 @@
 ## 동작 구조
 
 ```mermaid
-flowchart LR
-  ROOT["랩 루트 CA<br/>(bootstrap이 생성)"]
+sequenceDiagram
+  participant B as bootstrap
+  participant U as client<br/>lab-login (uid 1001)
+  participant A as spire-agent
+  participant S as spire-server
+  participant CA as step-ca<br/>x5c-spire
+  participant H as sshd 호스트<br/>host-billing
 
-  subgraph client["client 컨테이너 (capability 없음)"]
-    L["lab-login<br/>계정 uid로 실행<br/>deployer · monitor · stranger · intruder"]
+  rect rgba(128, 128, 128, 0.12)
+    Note over B,H: 준비 (make up 때)
+    B->>S: 랩 루트로 서명한 SPIRE intermediate,<br/>entry 등록 (uid → SPIFFE ID)
+    B->>CA: X5C 신뢰 루트 = 랩 루트,<br/>SPIFFE ID → principal 매핑, policy
+    B->>H: step-ca SSH user CA 공개키
+    S-->>A: entry별 SVID 서명 (5분, 계속 갱신)
   end
 
-  subgraph spire["SPIRE"]
-    S["spire-server"]
-    A["spire-agent<br/>uid로 워크로드 증명"]
-  end
-
-  CA["step-ca<br/>provisioner x5c-spire<br/>체인 검증 · 매핑 · policy · 5분 상한"]
-
-  subgraph hosts["sshd 호스트"]
-    HB["host-billing<br/>admin · operator · readonly"]
-    HC["host-crm<br/>admin · operator · readonly"]
-  end
-
-  ROOT -. "intermediate 서명" .-> S
-  ROOT -. "X5C 신뢰 루트" .-> CA
-  S --- A
-  L -- "1. Workload API" --> A
-  A -- "2. X.509-SVID 5분<br/>등록된 uid만" --> L
-  L -- "3. SVID 키로 서명한 X5C 요청" --> CA
-  CA -- "4. SSH 인증서 5분 이하<br/>KeyID = SPIFFE ID<br/>principal = role-{역할}@{그룹}" --> L
-  L -- "5. 그 인증서로만 ssh" --> HB
-  L -- "5. 그 인증서로만 ssh" --> HC
-  CA -. "SSH user CA 공개키" .-> hosts
+  Note over U,H: 접속할 때마다
+  U->>A: 1. SVID 요청 (Workload API, 신원은 적지 않음)
+  Note over A: 커널에서 호출자 uid 확인 → entry 매칭<br/>entry 없음 → 거부 (intruder)
+  A-->>U: 2. X.509-SVID spiffe://lab/client/deployer
+  U->>CA: 3. SSH 인증서 요청 (SVID 키로 서명한 X5C 토큰)
+  Note over CA: SVID 체인 → 랩 루트 검증<br/>SPIFFE ID → principal 매핑 (없으면 거부: stranger)<br/>policy (role-admin 거부), 수명 ≤ 5분, ≤ SVID 만료
+  CA-->>U: 4. SSH 인증서 (KeyID = SPIFFE ID,<br/>principal role-operator@billing)
+  U->>H: 5. ssh operator@host-billing (그 인증서로만)
+  Note over H: user CA 서명, 유효기간 확인<br/>principal → 역할 계정 (operator)
+  H-->>U: 6. 세션 (열린 지 60분이면 호스트가 끊음)
 ```
 
-1. client의 계정(uid)이 spire-agent에 SVID를 요청합니다. 요청에 신원을 적는 곳은 없고, agent가 프로세스의 uid를 보고 판단합니다. 등록되지 않은 uid(intruder)는 여기서 거부됩니다.
-2. agent가 그 uid의 X.509-SVID(`spiffe://lab/client/<계정>`)를 줍니다.
+준비 단계는 `make up`이 한 번 합니다. 신뢰 관계를 심는 단계입니다. 그 뒤로 접속할 때마다 아래 순서를 밟습니다 (`lab-login`이 1~5를 한 번에 합니다).
+
+1. client의 계정이 spire-agent에 SVID를 요청합니다. 요청에는 신원을 적는 곳이 없습니다.
+2. agent는 커널에서 호출한 프로세스의 uid를 확인하고, 등록된 entry와 맞으면 그 SVID를 줍니다. entry가 없는 uid(intruder)는 여기서 거부됩니다.
 3. client가 SVID 키로 서명한 X5C 토큰으로 step-ca에 SSH 인증서를 요청합니다.
 4. step-ca가 SVID 체인을 랩 루트로 검증합니다. 이어서 SPIFFE ID를 매핑해 principal을 정하고, policy와 수명 상한을 적용해 서명합니다. 매핑이 없는 신원(stranger)과 `role-admin@*`은 여기서 거부됩니다.
-5. 그 인증서로만 호스트에 접속합니다.
-   - 호스트는 step-ca의 SSH user CA만 믿습니다.
-   - principal이 어느 역할 계정으로 들어갈 수 있는지 정합니다.
-   - 연결은 열린 지 60분이 지나면 호스트가 끊습니다.
+5. 그 인증서로만 호스트에 접속합니다. 호스트는 step-ca의 SSH user CA만 믿고, principal로 어느 역할 계정에 들어갈 수 있는지 정합니다.
+6. 세션이 열립니다. 인증서가 만료돼도 열린 세션은 유지되지만, 연결이 열린 지 60분이 지나면 호스트가 끊습니다.
 
 ## 무엇을 보여 주는가
 
